@@ -161,13 +161,17 @@ public class BasicAuctionClusterClient implements EgressListener
     private long sendBid(final AeronCluster aeronCluster, final long price)
     {
         final long correlationId = this.correlationId++;
+        // 将要发送的消息放入buffer
         actionBidBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);            // <1>
         actionBidBuffer.putLong(CUSTOMER_ID_OFFSET, customerId);
         actionBidBuffer.putLong(PRICE_OFFSET, price);
 
         idleStrategy.reset();
+        // 发送消息
         while (aeronCluster.offer(actionBidBuffer, 0, BID_MESSAGE_LENGTH) < 0)    // <2>
         {
+            // 如果我们发送失败，并且需要运行一个空闲循环，我们应该使用 IdleStrategy 来确保我们不会过度使用 CPU。
+            // 对于集群客户端，我们还应该不断地轮询出口流以使用从集群发回的任何消息，包括错误或会话状态消息。
             idleStrategy.idle(aeronCluster.pollEgress());                         // <3>
         }
 
@@ -227,10 +231,15 @@ public class BasicAuctionClusterClient implements EgressListener
                 .dirDeleteOnShutdown(true));
             AeronCluster aeronCluster = AeronCluster.connect(
                 new AeronCluster.Context()
+                        // 客户端处理cluster响应的业务逻辑绑定在这里
                 .egressListener(client)                                                                         // <2>
+                        // 指定从cluster接收响应的egress channel（Client自己的endpoint）
+                        // 如果希望所有客户端都看到所有响应，则可以在此处指定多播地址
                 .egressChannel("aeron:udp?endpoint=localhost:0")                                                // <3>
                 .aeronDirectoryName(mediaDriver.aeronDirectoryName())
+                        // 指定集群的ingress channel
                 .ingressChannel("aeron:udp")                                                                    // <4>
+                        // cluster所有节点的静态endpoint
                 .ingressEndpoints(ingressEndpoints)))                                                           // <5>
         {
         // end::connect[]

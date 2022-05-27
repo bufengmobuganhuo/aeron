@@ -61,9 +61,12 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::start[]
     public void onStart(final Cluster cluster, final Image snapshotImage)
     {
+        // 保存下cluster的引用，这样可以在其他回调方法中使用集群的功能
         this.cluster = cluster;                      // <1>
+        // 保存集群的空闲策略，会在服务的duty cycle中使用
         this.idleStrategy = cluster.idleStrategy();  // <2>
 
+        // 如果快照不为空，则应该加载快照
         if (null != snapshotImage)                   // <3>
         {
             loadSnapshot(cluster, snapshotImage);
@@ -83,20 +86,26 @@ public class BasicAuctionClusteredService implements ClusteredService
         final int length,
         final Header header)
     {
+        // 解析出消息的字段
+        // correlationId是客户消息的一个唯一标识符
         final long correlationId = buffer.getLong(offset + CORRELATION_ID_OFFSET);                   // <1>
+        // 出价的客户的ID
         final long customerId = buffer.getLong(offset + CUSTOMER_ID_OFFSET);
+        // 具体出价
         final long price = buffer.getLong(offset + PRICE_OFFSET);
 
         final boolean bidSucceeded = auction.attemptBid(price, customerId);                          // <2>
 
         if (null != session)                                                                         // <3>
         {
+            // 序列化响应消息
             egressMessageBuffer.putLong(CORRELATION_ID_OFFSET, correlationId);                       // <4>
             egressMessageBuffer.putLong(CUSTOMER_ID_OFFSET, auction.getCurrentWinningCustomerId());
             egressMessageBuffer.putLong(PRICE_OFFSET, auction.getBestPrice());
             egressMessageBuffer.putByte(BID_SUCCEEDED_OFFSET, bidSucceeded ? (byte)1 : (byte)0);
 
             idleStrategy.reset();
+            // 通过egress channel发送响应消息
             while (session.offer(egressMessageBuffer, 0, EGRESS_MESSAGE_LENGTH) < 0)                 // <5>
             {
                 idleStrategy.idle();                                                                 // <6>
@@ -111,10 +120,12 @@ public class BasicAuctionClusteredService implements ClusteredService
     // tag::takeSnapshot[]
     public void onTakeSnapshot(final ExclusivePublication snapshotPublication)
     {
+        // 将需要写入快照的信息写入buffer
         snapshotBuffer.putLong(SNAPSHOT_CUSTOMER_ID_OFFSET, auction.getCurrentWinningCustomerId());  // <1>
         snapshotBuffer.putLong(SNAPSHOT_PRICE_OFFSET, auction.getBestPrice());
 
         idleStrategy.reset();
+        // 如果发送成功了就是成功写入了快照
         while (snapshotPublication.offer(snapshotBuffer, 0, SNAPSHOT_MESSAGE_LENGTH) < 0)            // <2>
         {
             idleStrategy.idle();
@@ -127,8 +138,10 @@ public class BasicAuctionClusteredService implements ClusteredService
     {
         final MutableBoolean allDataLoaded = new MutableBoolean(false);
 
+        // 一直处理，直到没有更多输入
         while (!snapshotImage.isEndOfStream())                                                       // <1>
         {
+            // 因为快照是写入到一个Publication的消息流，因此需要使用poll方法提取数据
             final int fragmentsPolled = snapshotImage.poll(
                 (buffer, offset, length, header) -> // <2>
                 {
@@ -136,13 +149,13 @@ public class BasicAuctionClusteredService implements ClusteredService
 
                     final long customerId = buffer.getLong(offset + SNAPSHOT_CUSTOMER_ID_OFFSET);
                     final long price = buffer.getLong(offset + SNAPSHOT_PRICE_OFFSET);
-
+                    // 根据消息初始化状态，这是业务逻辑自己实现的
                     auction.loadInitialState(price, customerId);                                     // <4>
 
                     allDataLoaded.set(true);
                 },
                 1);
-
+            // 加载完后，停止循环
             if (allDataLoaded.value)                                                                 // <5>
             {
                 break;
@@ -150,7 +163,7 @@ public class BasicAuctionClusteredService implements ClusteredService
 
             idleStrategy.idle(fragmentsPolled);                                                      // <6>
         }
-
+        // 再做一下校验，看是否加载完毕快照
         assert snapshotImage.isEndOfStream();                                                        // <7>
         assert allDataLoaded.value;
     }
